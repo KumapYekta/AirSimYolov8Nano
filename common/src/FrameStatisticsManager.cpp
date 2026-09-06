@@ -1,6 +1,6 @@
-#include "FrameStatisticsManager.h"
+#include "common/FrameStatisticsManager.h"
 
-namespace airsim_yolov8
+namespace common
 {
     FrameStatisticsManager::FrameStatisticsManager(double pReportPeriodSeconds)
         : mWindowStartTime(std::chrono::steady_clock::now())

@@ -56,6 +56,7 @@ namespace airsim_yolov8
             return false;
         }
 
+        // TODO: her seferinde poutframes'i clearlayip reservelemek mantikli mi? response'larin size'i zaten degismiyor sanki.
         pOutFrames.reserve(tResponses.size());
 
         for (const msr::airlib::ImageCaptureBase::ImageResponse& tResponse : tResponses)

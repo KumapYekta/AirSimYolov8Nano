@@ -3,7 +3,7 @@
 #include <chrono>
 #include <cstdint>
 
-namespace airsim_yolov8
+namespace common
 {
     // FPS ve toplam frame sayısı gibi olcumleri tutar.
     class FrameStatisticsManager

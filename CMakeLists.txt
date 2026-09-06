@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 
 project(AirSimYolov8Nano
-    VERSION 0.1.0
-    DESCRIPTION "AirSim camera capture pipeline for Jetson Orin Nano"
+    VERSION 0.3.0
+    DESCRIPTION "AirSim -> GStreamer UDP -> Jetson CUDA pipeline"
     LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -16,16 +16,15 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
 # -----------------------------------------------------------------------------
-# Dizin yapısı
+# Kok dizinler - once environment variable, yoksa gorece yol
 #
 #   <workspace>/
-#     ├── cots/                 -> 3. parti bagımlılıklar (AirSim, TensorRT sarmalayıcıları, ...)
-#     │     └── AirSim/
+#     ├── cots/                 -> 3. parti bagımlılıklar (AirSim, ...)
 #     └── projects/
-#           └── AirSimYolov8Nano/   -> bu proje
-#
-# Once environment variable'a bakılır, yoksa gorece yol kullanılır.
+#           └── AirSimYolov8Nano/
 # -----------------------------------------------------------------------------
 
 if(DEFINED ENV{COTS_ROOT})
@@ -44,63 +43,81 @@ endif()
 message(STATUS "COTS_ROOT   : ${COTS_ROOT}")
 message(STATUS "AIRSIM_ROOT : ${AIRSIM_ROOT}")
 
-if(NOT EXISTS "${COTS_ROOT}")
-    message(FATAL_ERROR "COTS_ROOT not found: ${COTS_ROOT} (export COTS_ROOT or pass -DCOTS_ROOT=<path>)")
-endif()
+# -----------------------------------------------------------------------------
+# GStreamer - her iki taraf da kullanıyor, bir kez bulunur
+# -----------------------------------------------------------------------------
 
-# Header ve Library yollarini dinamik ekleme
-include_directories(
-    ${AIRSIM_ROOT}/AirLib/include
-    ${AIRSIM_ROOT}/AirLib/deps/rpclib/include
-    ${AIRSIM_ROOT}/AirLib/deps/eigen3
-)
+if(DEFINED ENV{GSTREAMER_1_0_ROOT_MSVC_X86_64})
+    # Windows ters eğik çizgilerini (C:\...) CMake formatına (C:/...) çevir
+    file(TO_CMAKE_PATH "$ENV{GSTREAMER_1_0_ROOT_MSVC_X86_64}" _GST_DIR)
 
-add_executable(${PROJECT_NAME}
-    main.cpp
-    AirSimConnectionManager.cpp
-    AirSimConnectionManager.h
-    AirSimIncludes.h
-    CameraFrame.h
-    CameraImageProvider.cpp
-    CameraImageProvider.h
-    FrameStatisticsManager.cpp
-    FrameStatisticsManager.h
-    ImageRequestProvider.cpp
-    ImageRequestProvider.h
-    .gitignore
-    .gitattributes
-    # varsa diğer .cpp ve .h dosyalarınız
-)
+    message(STATUS "GSTREAMER_1_0_ROOT_MSVC_X86_64 : ${_GST_DIR}")
 
-target_link_directories(${PROJECT_NAME} PRIVATE
-    "${AIRSIM_ROOT}/AirLib/lib/x64/$<CONFIG>"
-    "${AIRSIM_ROOT}/AirLib/deps/rpclib/lib/x64/$<CONFIG>"
-)
+    # 1. GStreamer içindeki pkg-config.exe'yi CMake'e göster
+    list(PREPEND CMAKE_PROGRAM_PATH "${_GST_DIR}/bin")
 
-target_link_libraries(${PROJECT_NAME}
-    PRIVATE
-        AirLib
-        rpc
-)
-
-target_compile_features(${PROJECT_NAME} PRIVATE cxx_std_17)
-
-if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /std:c++17 /permissive-)
+    # 2. .pc dosyalarının yolunu ekle (Windows için noktalı virgül ';' kullanılır)
+    if(DEFINED ENV{PKG_CONFIG_PATH})
+        set(ENV{PKG_CONFIG_PATH} "${_GST_DIR}/lib/pkgconfig;$ENV{PKG_CONFIG_PATH}")
+    else()
+        set(ENV{PKG_CONFIG_PATH} "${_GST_DIR}/lib/pkgconfig")
+    endif()
 else()
-    target_compile_options(${PROJECT_NAME} PRIVATE -std=c++17)
+    message(FATAL_ERROR "GSTREAMER_1_0_ROOT_MSVC_X86_64 ortam degiskeni bulunamadi! GStreamer devel paketinin kurulu oldugundan emin olun.")
 endif()
 
-# AirLib clang + libc++ ile derlendiyse (AirSim'in kendi build.sh varsayılanı)
-# uygulamayı da aynı standart kutuphaneyle linklemek gerekir.
-option(AIRSIM_USE_LIBCXX "Link against libc++ (required if AirLib was built with clang/libc++)" OFF)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET
+    gstreamer-1.0>=1.16
+    gstreamer-app-1.0
+    gstreamer-video-1.0)
 
-if(AIRSIM_USE_LIBCXX)
-    target_compile_options(${PROJECT_NAME} PRIVATE -stdlib=libc++)
-    target_link_options(${PROJECT_NAME} PRIVATE -stdlib=libc++)
+# -----------------------------------------------------------------------------
+# Hangi taraf derlenecek?
+# Server AirSim + VAAPI ister, client CUDA ister. Ikisi farklı makinede
+# derlendigi icin varsayılanlar ortama gore otomatik belirleniyor.
+# -----------------------------------------------------------------------------
+
+if(EXISTS "${AIRSIM_ROOT}/AirLib/include")
+    set(BUILD_SERVER_DEFAULT ON)
+else()
+    set(BUILD_SERVER_DEFAULT OFF)
 endif()
 
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+if(DEFINED ENV{CUDA_ROOT})
+    set(CUDAToolkit_ROOT "$ENV{CUDA_ROOT}" CACHE PATH "CUDA toolkit root")
+elseif(DEFINED ENV{CUDA_HOME})
+    set(CUDAToolkit_ROOT "$ENV{CUDA_HOME}" CACHE PATH "CUDA toolkit root")
+endif()
 
-install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
+find_package(CUDAToolkit QUIET)
+
+if(CUDAToolkit_FOUND)
+    set(BUILD_CLIENT_DEFAULT ON)
+else()
+    set(BUILD_CLIENT_DEFAULT OFF)
+endif()
+
+option(BUILD_SERVER "Build the AirSim capture / UDP sender (needs AirSim)" ${BUILD_SERVER_DEFAULT})
+option(BUILD_CLIENT "Build the Jetson UDP receiver (needs CUDA)"           ${BUILD_CLIENT_DEFAULT})
+
+message(STATUS "BUILD_SERVER : ${BUILD_SERVER}")
+message(STATUS "BUILD_CLIENT : ${BUILD_CLIENT}")
+
+if((NOT BUILD_SERVER) AND (NOT BUILD_CLIENT))
+    message(FATAL_ERROR "Neither server nor client can be built. Check AIRSIM_ROOT / CUDA_ROOT.")
+endif()
+
+# -----------------------------------------------------------------------------
+# Alt projeler
+# -----------------------------------------------------------------------------
+
+add_subdirectory(common)
+
+if(BUILD_SERVER)
+    add_subdirectory(server)
+endif()
+
+if(BUILD_CLIENT)
+    add_subdirectory(client)
+endif()
